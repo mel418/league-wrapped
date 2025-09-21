@@ -1,0 +1,4 @@
+.env
+league-wrapped-env/
+__pycache__/
+*.pyc
