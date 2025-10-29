@@ -54,23 +54,48 @@ async def get_summoner_by_puuid(puuid, region="na1"):
         print(f"Summoner lookup failed: {response.status_code}")
         return None
 
-async def get_match_history(puuid, region="americas", count=100, start_time=None):
-    '''Get recent match IDS for a player'''
+async def get_match_history(puuid, region="americas", start_time=None):
+    '''Get recent match IDS for a player (pagination)'''
     api_key = os.getenv('RIOT_API_KEY')
     url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids"
     headers = {"X-Riot-Token": api_key}
-    params = {"start": 0, "count": count}
     
-    # Add startTime filter for 2025 matches only
-    if start_time:
-        params["startTime"] = start_time
-    
-    response = requests.get(url, headers=headers, params=params)
-    if response.status_code == 200:
-        return response.json()
-    else: 
-        print(f"Match history failed: {response.status_code}")
-        return None
+    all_match_ids = []
+    start_index = 0
+    batch_size = 100
+
+    while True:
+        params = {"start": start_index, "count": batch_size}
+
+        # Add startTime filter for 2025 matches only
+        if start_time:
+            params["startTime"] = start_time
+        
+        response = requests.get(url, headers=headers, params=params)
+        
+        if response.status_code == 200:
+            batch = response.json()
+        
+            # if no matches break
+            if not batch:
+                break
+
+            all_match_ids.extend(batch)
+
+            # if fewer than 100 last batch
+            if len(batch) < batch_size:
+                break
+
+            # next batch
+            start_index += batch_size
+
+            # delay rate limits
+            await asyncio.sleep(1.2)
+        else: 
+            print(f"Match history failed: {response.status_code}")
+            break
+        
+    return all_match_ids
 
 async def get_match_details(match_id, region="americas"):
     '''Get detailed match information'''
@@ -319,7 +344,7 @@ async def wrapped(ctx, *, summoner_input):
 
     # get match history from 2025 only
     start_of_2025 = int(datetime(2025, 1, 1).timestamp())
-    match_ids = await get_match_history(account['puuid'], count=100, start_time=start_of_2025)
+    match_ids = await get_match_history(account['puuid'], start_time=start_of_2025)
     
     if not match_ids:
         await ctx.send("❌ Could not fetch match history!")
@@ -337,11 +362,13 @@ async def wrapped(ctx, *, summoner_input):
     api_calls = 0
     all_player_stats = []
 
+    if len(match_ids) > 200:
+            await ctx.send(f"⚠️ Processing {len(match_ids)} matches will take ~{len(match_ids)//50} minutes...")
+
     for i, match_id in enumerate(match_ids):
         # progress updates every 10 matches
         '''if (i+1) % 10 == 0:
             await ctx.send(f"⏳ Progress: {i + 1}/{len(match_ids)} matches processed...")'''
-        
         # check if cached first
         is_cached = await get_cached_match(match_id, account['puuid']) is not None
 
