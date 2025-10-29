@@ -20,6 +20,12 @@ players_table = dynamodb.Table('rift-rewind-players')
 
 print("Initializing bot with DynamoDb connection")
 
+# init bedrock client
+bedrock = boto3.client(
+    service_name = 'bedrock-runtime',
+    region_name=os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+)
+
 # league API functions
 async def get_summoner_by_riot_id(game_name, tag_line="NA1", region="americas"):
     '''Get summoner info by Riot ID'''
@@ -215,6 +221,53 @@ def calculate_aggregate_stats(all_stats):
         'total_assists': total_assists
     }
 
+async def generate_ai_insights(stats, game_name, tag_line):
+    '''generate ai insights using aws bedrock'''
+
+    prompt = f"""You are an expert League of Legends coach analyzing a player's 2025 season performance. 
+    
+Player: {game_name}#{tag_line}
+
+Season Statistics:
+- Total Games: {stats['total_games']}
+- Record: {stats['wins']}W - {stats['losses']}L ({stats['win_rate']:.1f}% win rate)
+- Top 3 Champions: {', '.join([f"{champ} ({games} games)" for champ, games in stats['top_champions'][:3]])}
+- Main Role: {stats['most_played_role'][0]}
+- Average KDA: {stats['avg_kda']:.2f} ({stats['total_kills']}K / {stats['total_deaths']}D / {stats['total_assists']}A)
+
+Based on this data, provide:
+1. A brief personality assessment of their playstyle (2-3 sentences)
+2. Their biggest strength (1 sentence)
+3. One specific area for improvement with actionable advice (2-3 sentences)
+4. One surprising or interesting insight from their stats (1-2 sentences)
+
+Keep your response conversational, encouraging, and under 200 words total."""
+    
+    conversation = [
+        {
+            "role": "user",
+            "content": [{"text": prompt}]
+        }
+    ]
+
+    try:
+        response = bedrock.converse(
+            modelId='anthropic.claude-3-haiku-20240307-v1:0',
+            messages=conversation,
+            inferenceConfig={
+                "maxTokens": 500,
+                "temperature": 0.7, # a bit creative but not too random
+                "topP": 0.9
+            }
+        )
+
+        # extract response
+        ai_insights = response["output"]["message"]["content"][0]["text"]
+        return ai_insights
+    
+    except Exception as e:
+        print(f"Error generating AI insights: {e}")
+        return "Unable to generate AI insights at this time."
 
 @bot.command()
 async def test_aws(ctx):
@@ -286,8 +339,8 @@ async def wrapped(ctx, *, summoner_input):
 
     for i, match_id in enumerate(match_ids):
         # progress updates every 10 matches
-        if (i+1) % 10 == 0:
-            await ctx.send(f"⏳ Progress: {i + 1}/{len(match_ids)} matches processed...")
+        '''if (i+1) % 10 == 0:
+            await ctx.send(f"⏳ Progress: {i + 1}/{len(match_ids)} matches processed...")'''
         
         # check if cached first
         is_cached = await get_cached_match(match_id, account['puuid']) is not None
@@ -319,6 +372,10 @@ async def wrapped(ctx, *, summoner_input):
     if not stats:
         await ctx.send("❌ No valid match data found!")
         return
+    
+    # generate ai insights
+    await ctx.send("Generating AI-powered insights...")
+    ai_insights = await generate_ai_insights(stats, account['gameName'], account["tagLine"])
 
     # Create detailed results embed
     embed = discord.Embed(
@@ -359,14 +416,16 @@ async def wrapped(ctx, *, summoner_input):
               f"{stats['total_kills']}K / {stats['total_deaths']}D / {stats['total_assists']}A",
         inline=True
     )
-    
+
     # Cache stats (footer)
     embed.set_footer(
         text=f"💾 {cache_hits} cached | 🌐 {api_calls} API calls | 📅 {len(match_ids)} total matches"
     )
     
     await ctx.send(embed=embed)
-    await ctx.send("🤖 **Next:** AI-powered insights coming in Day 3!")
+    
+    ai_message = f"## AI Coach Analysis\n\n{ai_insights}"
+    await ctx.send(ai_message)
 
 @bot.event
 async def on_ready():
