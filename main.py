@@ -48,13 +48,17 @@ async def get_summoner_by_puuid(puuid, region="na1"):
         print(f"Summoner lookup failed: {response.status_code}")
         return None
 
-async def get_match_history(puuid, region="americas", count= 20):
+async def get_match_history(puuid, region="americas", count=100, start_time=None):
     '''Get recent match IDS for a player'''
     api_key = os.getenv('RIOT_API_KEY')
     url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/by-puuid/{puuid}/ids"
     headers = {"X-Riot-Token": api_key}
     params = {"start": 0, "count": count}
-
+    
+    # Add startTime filter for 2025 matches only
+    if start_time:
+        params["startTime"] = start_time
+    
     response = requests.get(url, headers=headers, params=params)
     if response.status_code == 200:
         return response.json()
@@ -260,24 +264,29 @@ async def wrapped(ctx, *, summoner_input):
 
     await ctx.send(f"✅ Found: **{account['gameName']}#{account['tagLine']}** (Level {summoner['summonerLevel']})")
 
-    # get recent match history
-    match_ids = await get_match_history(account['puuid'], count = 100)
+    # get match history from 2025 only
+    start_of_2025 = int(datetime(2025, 1, 1).timestamp())
+    match_ids = await get_match_history(account['puuid'], count=100, start_time=start_of_2025)
+    
     if not match_ids:
         await ctx.send("❌ Could not fetch match history!")
         return
     
-    await ctx.send(f"📊 Analyzing **{len(match_ids)}** recent matches...")
+    if len(match_ids) == 0:
+        await ctx.send("❌ No matches found from 2025!")
+        return
+    
+    await ctx.send(f"📊 Found **{len(match_ids)}** matches from 2025. Analyzing...")
 
     # process matches
     processed = 0
     cache_hits = 0
     api_calls = 0
     all_player_stats = []
-    matches_2025 = 0
 
     for i, match_id in enumerate(match_ids):
-        # progress updates
-        if (i+1) % 5 == 0:
+        # progress updates every 10 matches
+        if (i+1) % 10 == 0:
             await ctx.send(f"⏳ Progress: {i + 1}/{len(match_ids)} matches processed...")
         
         # check if cached first
@@ -293,11 +302,10 @@ async def wrapped(ctx, *, summoner_input):
             else:
                 api_calls += 1
             
-            if is_from_2025(match_data):
-                matches_2025 += 1
-                player_stats = extract_player_stats(match_data, account['puuid'])
-                if player_stats:
-                    all_player_stats.append(player_stats)
+            # Extract player stats
+            player_stats = extract_player_stats(match_data, account['puuid'])
+            if player_stats:
+                all_player_stats.append(player_stats)
         
         # small delay to respect rate limits
         if not is_cached:
@@ -309,12 +317,13 @@ async def wrapped(ctx, *, summoner_input):
     stats = calculate_aggregate_stats(all_player_stats)
 
     if not stats:
-        await ctx.send("No valid match data found!")
+        await ctx.send("❌ No valid match data found!")
+        return
 
     # Create detailed results embed
     embed = discord.Embed(
         title=f"🎮 League Wrapped 2025",
-        description=f"**{account['gameName']}#{account['tagLine']}**",
+        description=f"**{account['gameName']}#{account['tagLine']}** - Year to Date",
         color=discord.Color.gold()
     )
     
@@ -353,7 +362,7 @@ async def wrapped(ctx, *, summoner_input):
     
     # Cache stats (footer)
     embed.set_footer(
-        text=f"💾 {cache_hits} cached | 🌐 {api_calls} API calls | 📅 {matches_2025} matches from 2025"
+        text=f"💾 {cache_hits} cached | 🌐 {api_calls} API calls | 📅 {len(match_ids)} total matches"
     )
     
     await ctx.send(embed=embed)
