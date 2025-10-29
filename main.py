@@ -120,9 +120,97 @@ async def get_match_details_cached(match_id, puuid, region='americas'):
     if match_data:
         # store in cache for next time
         await store_match_data(match_id, puuid, match_data)
-        print(f"Cached: {match_id}")
+        # print(f"Cached: {match_id}")
 
     return match_data
+
+# statistics helper functs
+def is_from_2025(match_data):
+    try:
+        game_start = match_data['info']['gameStartTimestamp']
+        game_date = datetime.fromtimestamp(game_start/1000)
+        return game_date.year == 2025
+    except:
+        return False
+    
+def extract_player_stats(match_data, puuid):
+    '''extract stats for specific player from match data'''
+    try:
+        participants = match_data['info']['participants']
+
+        # find the player in match
+        player_data = None
+        for participant in participants:
+            if participant['puuid'] == puuid:
+                player_data = participant
+                break
+        
+        if not player_data:
+            return None
+        
+        return {
+            'champion': player_data['championName'],
+            'role': player_data['teamPosition'],
+            'kills': player_data['kills'],
+            'deaths': player_data['deaths'],
+            'assists': player_data['assists'],
+            'win': player_data['win'],
+            'gameDuration': match_data['info']['gameDuration'],
+            'gameDate': datetime.fromtimestamp(match_data['info']['gameStartTimestamp'] / 1000)
+        }
+    except Exception as e:
+        print(f"Error extracting player stats: {e}")
+        return None
+    
+def calculate_aggregate_stats(all_stats):
+    '''calc aggr stats from all matches'''
+    if not all_stats:
+        return None
+    
+    total_games = len(all_stats)
+    wins = sum(1 for s in all_stats if s['win'])
+    losses = total_games - wins
+    win_rate = (wins / total_games * 100) if total_games > 0 else 0
+
+    # champ stats
+    champion_games = {}
+    champion_wins = {}
+    for stat in all_stats:
+        champ = stat['champion']
+        champion_games[champ] = champion_games.get(champ, 0) + 1
+        if stat['win']: 
+            champion_wins[champ] = champion_wins.get(champ, 0) + 1
+    
+    # sort champs by games played
+    top_champions = sorted(champion_games.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    # role stats
+    role_games = {}
+    for stat in all_stats:
+        role = stat['role'] if stat['role'] else 'UNKNOWN'
+        role_games[role] = role_games.get(role, 0) + 1 
+    
+    most_played_role = max(role_games.items(), key=lambda x: x[1]) if role_games else ('UNKNOWN', 0)
+
+    # KDA stats
+    total_kills = sum(s['kills'] for s in all_stats)
+    total_deaths = sum(s['deaths'] for s in all_stats)
+    total_assists = sum(s['assists'] for s in all_stats)
+    avg_kda = ((total_kills + total_assists) / total_deaths) if total_deaths > 0 else total_kills + total_assists
+
+    return {
+        'total_games': total_games,
+        'wins': wins,
+        'losses': losses,
+        'win_rate': win_rate,
+        'top_champions': top_champions,
+        'most_played_role': most_played_role,
+        'avg_kda': avg_kda,
+        'total_kills': total_kills,
+        'total_deaths': total_deaths,
+        'total_assists': total_assists
+    }
+
 
 @bot.command()
 async def test_aws(ctx):
@@ -147,6 +235,8 @@ async def test_aws(ctx):
 
 @bot.command()
 async def wrapped(ctx, *, summoner_input):
+    '''league wrapped for player'''
+
     # handle both formats: "blaberfish2" or "blaberfish2#NA1"
     if "#" in summoner_input:
         game_name, tag_line = summoner_input.split("#", 1)
@@ -182,6 +272,8 @@ async def wrapped(ctx, *, summoner_input):
     processed = 0
     cache_hits = 0
     api_calls = 0
+    all_player_stats = []
+    matches_2025 = 0
 
     for i, match_id in enumerate(match_ids):
         # progress updates
@@ -200,22 +292,72 @@ async def wrapped(ctx, *, summoner_input):
                 cache_hits += 1
             else:
                 api_calls += 1
+            
+            if is_from_2025(match_data):
+                matches_2025 += 1
+                player_stats = extract_player_stats(match_data, account['puuid'])
+                if player_stats:
+                    all_player_stats.append(player_stats)
         
         # small delay to respect rate limits
-        await asyncio.sleep(0.5)
+        if not is_cached:
+            await asyncio.sleep(1.2)
+        else:
+            await asyncio.sleep(0.1)
+    
+    # calc aggr stats
+    stats = calculate_aggregate_stats(all_player_stats)
 
-    # results summary
+    if not stats:
+        await ctx.send("No valid match data found!")
+
+    # Create detailed results embed
     embed = discord.Embed(
-        title="Analysis Complete!",
-        description=f"Successfully processed {processed} matches",
-        color = discord.Color.blue()
+        title=f"🎮 League Wrapped 2025",
+        description=f"**{account['gameName']}#{account['tagLine']}**",
+        color=discord.Color.gold()
     )
-    embed.add_field(name="From cache", value=cache_hits, inline=True)
-    embed.add_field(name="API calls", value=api_calls, inline=True)
-    embed.add_field(name="Total", value=processed, inline=True)
-    embed.set_footer(text="AI-Powered insights coming soon!!")
-
+    
+    # Overview
+    embed.add_field(
+        name="📊 Overview",
+        value=f"**{stats['total_games']}** games played in 2025\n"
+              f"**{stats['wins']}W - {stats['losses']}L** ({stats['win_rate']:.1f}% win rate)",
+        inline=False
+    )
+    
+    # Top Champions
+    champ_text = "\n".join([
+        f"**{i+1}.** {champ} - {games} games ({games/stats['total_games']*100:.1f}%)"
+        for i, (champ, games) in enumerate(stats['top_champions'][:3])
+    ])
+    embed.add_field(
+        name="🏆 Top Champions",
+        value=champ_text or "No data",
+        inline=False
+    )
+    
+    # Role & KDA
+    embed.add_field(
+        name="⚔️ Main Role",
+        value=f"**{stats['most_played_role'][0]}**\n{stats['most_played_role'][1]} games",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="📈 Average KDA",
+        value=f"**{stats['avg_kda']:.2f}**\n"
+              f"{stats['total_kills']}K / {stats['total_deaths']}D / {stats['total_assists']}A",
+        inline=True
+    )
+    
+    # Cache stats (footer)
+    embed.set_footer(
+        text=f"💾 {cache_hits} cached | 🌐 {api_calls} API calls | 📅 {matches_2025} matches from 2025"
+    )
+    
     await ctx.send(embed=embed)
+    await ctx.send("🤖 **Next:** AI-powered insights coming in Day 3!")
 
 @bot.event
 async def on_ready():
